@@ -20,7 +20,7 @@
    <item>
     <widget class="QLabel" name="descriptionLabel">
      <property name="text">
-      <string>The selected entries are combined into a single entry. Attachments, tags, Auto-Type associations and a passkey are carried over where the entry you merge into has none of its own.</string>
+      <string>The selected entries are combined into a single entry. Attachments, tags, Auto-Type associations, a passkey and TOTP settings are carried over where the entry you merge into has none of its own.</string>
      </property>
      <property name="wordWrap">
       <bool>true</bool>

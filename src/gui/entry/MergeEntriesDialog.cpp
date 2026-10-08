@@ -18,6 +18,7 @@
 #include "MergeEntriesDialog.h"
 #include "ui_MergeEntriesDialog.h"
 
+#include "core/Config.h"
 #include "core/Entry.h"
 #include "core/Group.h"
 
@@ -185,8 +186,23 @@ bool MergeEntriesDialog::isConcatenatedNotes(const QString& key) const
     return key == EntryAttributes::NotesKey && m_ui->concatenateNotesCheckBox->isChecked();
 }
 
-bool MergeEntriesDialog::isProtectedAttribute(const QString& key) const
+bool MergeEntriesDialog::isHiddenAttribute(const QString& key) const
 {
+    // Reveal no more than the entry list does, and never a password
+    if (key == EntryAttributes::PasswordKey) {
+        return true;
+    }
+    if (key == EntryAttributes::TitleKey || key == EntryAttributes::URLKey) {
+        return false;
+    }
+    if (key == EntryAttributes::UserNameKey) {
+        return config()->get(Config::GUI_HideUsernames).toBool();
+    }
+    if (key == EntryAttributes::NotesKey) {
+        return config()->get(Config::Security_HideNotes).toBool();
+    }
+
+    // Like the Advanced tab, hide custom attributes that any of the entries protects
     for (const Entry* entry : m_entries) {
         if (entry->attributes()->isProtected(key)) {
             return true;
@@ -219,11 +235,11 @@ QString MergeEntriesDialog::attributeLabel(const QString& key) const
 
 QString MergeEntriesDialog::valueLabel(const QString& key, const QString& value) const
 {
-    if (!isProtectedAttribute(key)) {
+    if (!isHiddenAttribute(key)) {
         return value;
     }
 
-    // Never reveal a protected value: offer it by the entries that hold it instead
+    // Offer a hidden value by the entries that hold it instead
     QStringList titles;
     for (const Entry* entry : m_entries) {
         if (entry->attributes()->value(key) == value) {
@@ -241,7 +257,10 @@ QString MergeEntriesDialog::entryLabel(const Entry* entry) const
         label = tr("(no title)");
     }
 
-    const auto username = entry->resolvePlaceholder(entry->username());
+    // Usernames follow the choice made for the entry list
+    const auto username = isHiddenAttribute(EntryAttributes::UserNameKey)
+                              ? QString("\u25cf").repeated(6)
+                              : entry->resolvePlaceholder(entry->username());
     if (!username.isEmpty()) {
         label = QString("%1 (%2)").arg(label, username);
     }

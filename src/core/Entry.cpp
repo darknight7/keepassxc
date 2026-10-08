@@ -1033,6 +1033,32 @@ QStringList Entry::calculateDifference(const Entry* other)
     return modifiedFields;
 }
 
+namespace
+{
+    bool isTotpAttribute(const QString& key)
+    {
+        return key == Totp::ATTRIBUTE_OTP || key == Totp::ATTRIBUTE_SEED || key == Totp::ATTRIBUTE_SETTINGS
+               || key == Totp::KP2_TOTP_SECRET || key == Totp::KP2_TOTP_ALGORITHM || key == Totp::KP2_TOTP_LENGTH
+               || key == Totp::KP2_TOTP_PERIOD;
+    }
+
+    // Passkeys and TOTP settings are merged as a whole, and a remembered decision to
+    // run a command URL belongs to the entry it was made for
+    bool isMergedSeparately(const QString& key)
+    {
+        return EntryAttributes::isPasskeyAttribute(key) || isTotpAttribute(key)
+               || key == EntryAttributes::RememberCmdExecAttr;
+    }
+
+    // Combined notes are separated by an empty line, so only a complete block counts
+    // as already present
+    bool containsNotesBlock(const QString& notes, const QString& block)
+    {
+        return notes == block || notes.startsWith(block + "\n\n") || notes.endsWith("\n\n" + block)
+               || notes.contains("\n\n" + block + "\n\n");
+    }
+} // namespace
+
 QMap<QString, QStringList> Entry::conflictingAttributes(const QList<Entry*>& entries)
 {
     QMap<QString, QStringList> attributeValues;
@@ -1040,8 +1066,7 @@ QMap<QString, QStringList> Entry::conflictingAttributes(const QList<Entry*>& ent
     for (const Entry* entry : entries) {
         const auto keyList = entry->attributes()->keys();
         for (const QString& key : keyList) {
-            // A passkey is merged as a whole and never offered as a choice
-            if (EntryAttributes::isPasskeyAttribute(key)) {
+            if (isMergedSeparately(key)) {
                 continue;
             }
 
@@ -1118,22 +1143,30 @@ void Entry::mergeFrom(const QList<Entry*>& others, const QHash<QString, QString>
     // Apply the caller's decisions first, so that the other entries have to yield
     // to them below
     for (auto i = resolvedAttributes.constBegin(); i != resolvedAttributes.constEnd(); ++i) {
-        const auto currentValue = m_attributes->value(i.key());
-        if (currentValue == i.value()) {
+        const auto& key = i.key();
+        const auto currentValue = m_attributes->value(key);
+        if (isMergedSeparately(key) || currentValue == i.value()) {
             continue;
         }
 
-        m_attributes->set(i.key(), i.value(), protectedKeys.contains(i.key()));
+        const auto protect = protectedKeys.contains(key);
+        setMergedAttribute(key, i.value(), protect);
 
-        // Only once the chosen value is in place is the previous one an extra URL
-        if (flags.testFlag(MergeKeepDiscardedUrls) && isUrlAttribute(i.key())) {
-            addAdditionalUrl(currentValue);
+        // Only once the chosen value is in place can the previous one be kept aside
+        if (currentValue.isEmpty()) {
+            continue;
+        }
+        if (flags.testFlag(MergeKeepDiscardedUrls) && isUrlAttribute(key)) {
+            addAdditionalUrl(currentValue, protect);
+        } else if (flags.testFlag(MergeKeepDiscardedValues)) {
+            setMergedAttribute(availableAttributeKey(key, true), currentValue, protect);
         }
     }
 
     for (const Entry* other : asConst(mergeable)) {
         mergeAttributesFrom(other, protectedKeys, flags);
         mergePasskeyFrom(other);
+        mergeTotpFrom(other, protectedKeys, flags);
         mergeAttachmentsFrom(other);
 
         const auto tagList = other->tagList();
@@ -1161,15 +1194,30 @@ void Entry::mergeFrom(const QList<Entry*>& others, const QHash<QString, QString>
             }
         }
 
+        // Like the icon, colors and a URL override are taken where this entry has none
+        if (foregroundColor().isEmpty()) {
+            setForegroundColor(other->foregroundColor());
+        }
+        if (backgroundColor().isEmpty()) {
+            setBackgroundColor(other->backgroundColor());
+        }
+        if (overrideUrl().isEmpty()) {
+            setOverrideUrl(other->overrideUrl());
+        }
+
         const auto customDataKeys = other->customData()->keys();
         for (const QString& key : customDataKeys) {
             if (!m_customData->hasKey(key)) {
                 m_customData->set(key, other->customData()->item(key));
             }
         }
+    }
 
-        if (!hasTotp() && other->hasTotp()) {
-            setTotp(QSharedPointer<Totp::Settings>::create(*other->totpSettings()));
+    // Values that were equal needed no change, but their protection may still have to
+    // be raised
+    for (const QString& key : asConst(protectedKeys)) {
+        if (m_attributes->hasKey(key) && !m_attributes->isProtected(key)) {
+            m_attributes->set(key, m_attributes->value(key), true);
         }
     }
 }
@@ -1178,28 +1226,28 @@ void Entry::mergeAttributesFrom(const Entry* other, const QSet<QString>& protect
 {
     const auto keyList = other->attributes()->keys();
     for (const QString& key : keyList) {
-        // A passkey is merged as a whole, see mergePasskeyFrom()
-        if (EntryAttributes::isPasskeyAttribute(key)) {
+        if (isMergedSeparately(key)) {
             continue;
         }
 
         const auto value = other->attributes()->value(key);
-        if (value.isEmpty() || m_attributes->value(key) == value) {
+        const auto currentValue = m_attributes->value(key);
+        if (value.isEmpty() || currentValue == value) {
             continue;
         }
 
-        if (!m_attributes->hasKey(key) || m_attributes->value(key).isEmpty()) {
-            m_attributes->set(key, value, protectedKeys.contains(key));
+        const auto protect = protectedKeys.contains(key);
+        if (!m_attributes->hasKey(key) || currentValue.isEmpty()) {
+            setMergedAttribute(key, value, protect);
         } else if (flags.testFlag(MergeConcatenateNotes) && key == EntryAttributes::NotesKey) {
             // Keep the notes of every merged entry instead of only one of them
-            const auto notes = m_attributes->value(key);
-            if (!notes.contains(value)) {
-                m_attributes->set(key, QString("%1\n\n%2").arg(notes, value), protectedKeys.contains(key));
+            if (!containsNotesBlock(currentValue, value)) {
+                setMergedAttribute(key, QString("%1\n\n%2").arg(currentValue, value), protect);
             }
         } else if (flags.testFlag(MergeKeepDiscardedUrls) && isUrlAttribute(key)) {
-            addAdditionalUrl(value);
+            addAdditionalUrl(value, protect);
         } else if (flags.testFlag(MergeKeepDiscardedValues)) {
-            m_attributes->set(availableAttributeKey(key), value, protectedKeys.contains(key));
+            setMergedAttribute(availableAttributeKey(key, true), value, protect);
         }
     }
 }
@@ -1223,6 +1271,30 @@ void Entry::mergePasskeyFrom(const Entry* other)
     addTag(tr("Passkey"));
 }
 
+void Entry::mergeTotpFrom(const Entry* other, const QSet<QString>& protectedKeys, MergeFlags flags)
+{
+    // The TOTP settings can be stored in several ways and updateTotp() prefers some
+    // over others, so mixing them would silently switch this entry to another secret.
+    // They are merged as a whole and only into an entry that has none yet.
+    const auto carriesTotp = hasTotpAttributes();
+
+    const auto keyList = other->attributes()->keys();
+    for (const QString& key : keyList) {
+        if (!isTotpAttribute(key)) {
+            continue;
+        }
+
+        const auto value = other->attributes()->value(key);
+        const auto protect = protectedKeys.contains(key);
+        if (!carriesTotp) {
+            setMergedAttribute(key, value, protect);
+        } else if (flags.testFlag(MergeKeepDiscardedValues) && m_attributes->value(key) != value) {
+            // Kept for reference only: under another name the settings are inactive
+            setMergedAttribute(availableAttributeKey(key, true), value, protect);
+        }
+    }
+}
+
 void Entry::mergeAttachmentsFrom(const Entry* other)
 {
     const auto keyList = other->attachments()->keys();
@@ -1236,7 +1308,18 @@ void Entry::mergeAttachmentsFrom(const Entry* other)
     }
 }
 
-void Entry::addAdditionalUrl(const QString& url)
+void Entry::setMergedAttribute(const QString& key, const QString& value, bool protect)
+{
+    // A decision to run a command URL without asking applies to that URL only, as in
+    // setUrl()
+    if (key == EntryAttributes::URLKey && value != m_attributes->value(key)) {
+        m_attributes->remove(EntryAttributes::RememberCmdExecAttr);
+    }
+
+    m_attributes->set(key, value, protect);
+}
+
+void Entry::addAdditionalUrl(const QString& url, bool protect)
 {
     if (url.isEmpty() || url == m_attributes->value(EntryAttributes::URLKey)) {
         return;
@@ -1245,20 +1328,37 @@ void Entry::addAdditionalUrl(const QString& url)
     const auto keyList = m_attributes->keys();
     for (const QString& key : keyList) {
         if (key.startsWith(EntryAttributes::AdditionalUrlAttribute) && m_attributes->value(key) == url) {
+            // Already there, but its protection may still have to be raised
+            if (protect && !m_attributes->isProtected(key)) {
+                m_attributes->set(key, url, true);
+            }
             return;
         }
     }
 
-    m_attributes->set(availableAttributeKey(EntryAttributes::AdditionalUrlAttribute), url);
+    m_attributes->set(availableAttributeKey(EntryAttributes::AdditionalUrlAttribute), url, protect);
 }
 
-QString Entry::availableAttributeKey(const QString& key) const
+bool Entry::hasTotpAttributes() const
+{
+    const auto keyList = m_attributes->keys();
+    for (const QString& key : keyList) {
+        if (isTotpAttribute(key)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+QString Entry::availableAttributeKey(const QString& key, bool forceSuffix) const
 {
     QString name(key);
     int i = 1;
 
-    while (m_attributes->hasKey(name)) {
+    while (forceSuffix || m_attributes->hasKey(name)) {
         name = QString("%1_%2").arg(key, QString::number(i));
+        forceSuffix = false;
         ++i;
     }
 

@@ -52,6 +52,10 @@ private slots:
     void testMergeFromKeepsPasskeyIntact();
     void testUnmergeableEntries();
     void testMergeFromConcatenatesNotes();
+    void testMergeFromTotp();
+    void testMergeFromUnreadableTotp();
+    void testMergeFromCommandUrl();
+    void testMergeFromKeepsReplacedValues();
 };
 
 #endif // KEEPASSX_TESTENTRY_H

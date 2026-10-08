@@ -23,6 +23,7 @@
 #include "core/Group.h"
 #include "core/Metadata.h"
 #include "core/TimeInfo.h"
+#include "core/Totp.h"
 #include "crypto/Crypto.h"
 
 QTEST_GUILESS_MAIN(TestEntry)
@@ -1035,6 +1036,10 @@ void TestEntry::testMergeFrom()
     source->attachments()->set("key.pem", QByteArray("key"));
     source->autoTypeAssociations()->add({"Example Window", "{USERNAME}"});
     source->setIcon(12);
+    source->setForegroundColor("#ff0000");
+    source->setBackgroundColor("#0000ff");
+    source->setOverrideUrl("cmd://open {URL}");
+    target->setBackgroundColor("#00ff00");
 
     target->mergeFrom({source.data()});
 
@@ -1051,6 +1056,11 @@ void TestEntry::testMergeFrom()
 
     // The target still showed the default icon, so it takes the one it is given
     QCOMPARE(target->iconNumber(), 12);
+
+    // Like the icon, colors and a URL override are taken only where the target has none
+    QCOMPARE(target->foregroundColor(), QString("#ff0000"));
+    QCOMPARE(target->backgroundColor(), QString("#00ff00"));
+    QCOMPARE(target->overrideUrl(), QString("cmd://open {URL}"));
 
     // A colliding attachment is kept under a name that preserves the extension
     QCOMPARE(target->attachments()->value("notes.txt"), QByteArray("target"));
@@ -1216,4 +1226,139 @@ void TestEntry::testMergeFromConcatenatesNotes()
 
     // Nothing to concatenate to means no leading separator
     QCOMPARE(emptyNotes->notes(), QString("second note"));
+
+    // Only a complete block counts as already present, not a mere substring
+    QScopedPointer<Entry> longerNotes(new Entry());
+    longerNotes->setNotes("password");
+    QScopedPointer<Entry> shorterNotes(new Entry());
+    shorterNotes->setNotes("word");
+    longerNotes->mergeFrom({shorterNotes.data()}, {}, Entry::MergeConcatenateNotes);
+    QCOMPARE(longerNotes->notes(), QString("password\n\nword"));
+}
+
+void TestEntry::testMergeFromTotp()
+{
+    const QString ownSecret("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
+    const QString otherSecret("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP");
+
+    QScopedPointer<Entry> legacyTotp(new Entry());
+    legacyTotp->setTotp(Totp::createSettings(otherSecret, Totp::DEFAULT_DIGITS, Totp::DEFAULT_STEP, Totp::LEGACY));
+    QVERIFY(legacyTotp->attributes()->hasKey(Totp::ATTRIBUTE_SEED));
+
+    // Merging inside an update, as the merge dialog does, records a single history item
+    QScopedPointer<Entry> target(new Entry());
+    target->setTitle("Example");
+    target->beginUpdate();
+    target->mergeFrom({legacyTotp.data()});
+    QVERIFY(target->endUpdate());
+    QCOMPARE(target->historyItems().size(), 1);
+    QVERIFY(target->hasTotp());
+    QCOMPARE(target->totpSettings()->key, otherSecret);
+
+    QScopedPointer<Entry> ownTotp(new Entry());
+    ownTotp->setTotp(Totp::createSettings(ownSecret));
+    QVERIFY(ownTotp->attributes()->hasKey(Totp::ATTRIBUTE_OTP));
+
+    QScopedPointer<Entry> otherTotp(new Entry());
+    otherTotp->setTotp(Totp::createSettings(otherSecret));
+
+    // TOTP settings are merged as a whole and never offered as a choice
+    QVERIFY(!Entry::conflictingAttributes({ownTotp.data(), otherTotp.data()}).contains(Totp::ATTRIBUTE_OTP));
+
+    // An entry with TOTP settings of its own keeps them, whatever the format of the others
+    ownTotp->mergeFrom({legacyTotp.data()});
+    QCOMPARE(ownTotp->totpSettings()->key, ownSecret);
+    QVERIFY(!ownTotp->attributes()->hasKey(Totp::ATTRIBUTE_SEED));
+    QVERIFY(!ownTotp->attributes()->hasKey(Totp::ATTRIBUTE_SETTINGS));
+
+    // ...while the other secret is kept aside, inactive and still protected
+    const auto keptSeed = QString("%1_1").arg(Totp::ATTRIBUTE_SEED);
+    QCOMPARE(ownTotp->attribute(keptSeed), otherSecret);
+    QVERIFY(ownTotp->attributes()->isProtected(keptSeed));
+}
+
+void TestEntry::testMergeFromCommandUrl()
+{
+    QScopedPointer<Entry> target(new Entry());
+    target->setUrl("cmd://first-command");
+    target->attributes()->set(EntryAttributes::RememberCmdExecAttr, "1");
+
+    QScopedPointer<Entry> source(new Entry());
+    source->setUrl("cmd://second-command");
+
+    QHash<QString, QString> resolvedAttributes;
+    resolvedAttributes.insert(EntryAttributes::URLKey, "cmd://second-command");
+    target->mergeFrom({source.data()}, resolvedAttributes);
+
+    // Running the first command without asking must not carry over to the second one
+    QCOMPARE(target->url(), QString("cmd://second-command"));
+    QVERIFY(!target->attributes()->hasKey(EntryAttributes::RememberCmdExecAttr));
+
+    // Nor is such a decision ever taken from another entry
+    QScopedPointer<Entry> undecided(new Entry());
+    undecided->setUrl("cmd://first-command");
+    QScopedPointer<Entry> decided(new Entry());
+    decided->setUrl("cmd://second-command");
+    decided->attributes()->set(EntryAttributes::RememberCmdExecAttr, "1");
+
+    undecided->mergeFrom({decided.data()});
+    QCOMPARE(undecided->url(), QString("cmd://first-command"));
+    QVERIFY(!undecided->attributes()->hasKey(EntryAttributes::RememberCmdExecAttr));
+
+    // ...or offered as a choice
+    QScopedPointer<Entry> declined(new Entry());
+    declined->attributes()->set(EntryAttributes::RememberCmdExecAttr, "0");
+    QVERIFY(!Entry::conflictingAttributes({declined.data(), decided.data()})
+                 .contains(EntryAttributes::RememberCmdExecAttr));
+}
+
+void TestEntry::testMergeFromKeepsReplacedValues()
+{
+    QScopedPointer<Entry> target(new Entry());
+    target->setTitle("Old Title");
+    target->setUsername("user");
+    target->attributes()->set(EntryAttributes::URLKey, "https://old.example.com", true);
+
+    QScopedPointer<Entry> source(new Entry());
+    source->setTitle("New Title");
+    source->setUrl("https://new.example.com");
+    source->attributes()->set(EntryAttributes::UserNameKey, "user", true);
+
+    QHash<QString, QString> resolvedAttributes;
+    resolvedAttributes.insert(EntryAttributes::TitleKey, "New Title");
+    resolvedAttributes.insert(EntryAttributes::URLKey, "https://new.example.com");
+    target->mergeFrom({source.data()}, resolvedAttributes);
+
+    // The value the target held before the choice replaced it is kept as well
+    QCOMPARE(target->title(), QString("New Title"));
+    QCOMPARE(target->attribute("Title_1"), QString("Old Title"));
+
+    // A protected URL stays protected when it becomes an additional URL
+    QCOMPARE(target->url(), QString("https://new.example.com"));
+    QVERIFY(target->attributes()->isProtected(EntryAttributes::URLKey));
+    QCOMPARE(target->attribute(EntryAttributes::AdditionalUrlAttribute), QString("https://old.example.com"));
+    QVERIFY(target->attributes()->isProtected(EntryAttributes::AdditionalUrlAttribute));
+
+    // Equal values need no change, but their protection is still raised
+    QCOMPARE(target->username(), QString("user"));
+    QVERIFY(target->attributes()->isProtected(EntryAttributes::UserNameKey));
+}
+
+void TestEntry::testMergeFromUnreadableTotp()
+{
+    QScopedPointer<Entry> validTotp(new Entry());
+    validTotp->setTotp(Totp::createSettings("JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"));
+
+    // Unreadable TOTP settings still belong to the entry: they are neither replaced nor
+    // repaired through a nested history update
+    QScopedPointer<Entry> unreadableTotp(new Entry());
+    unreadableTotp->attributes()->set(Totp::ATTRIBUTE_OTP, "not a TOTP URL", true);
+    QVERIFY(!unreadableTotp->hasTotp());
+
+    unreadableTotp->beginUpdate();
+    unreadableTotp->mergeFrom({validTotp.data()});
+    QVERIFY(unreadableTotp->endUpdate());
+
+    QCOMPARE(unreadableTotp->historyItems().size(), 1);
+    QCOMPARE(unreadableTotp->attribute(Totp::ATTRIBUTE_OTP), QString("not a TOTP URL"));
 }

@@ -34,8 +34,9 @@ namespace Ui
  * Let the user merge several entries into one.
  *
  * The user picks the entry to merge into and, for every attribute the entries
- * disagree on, the value to keep. Values of protected attributes are never shown;
- * they are offered by the entry they come from instead.
+ * disagree on, the value to keep. The dialog reveals no more than the entry list
+ * does and never a password: a hidden value is offered by the entry it comes from
+ * instead.
  */
 class MergeEntriesDialog : public QDialog
 {
@@ -55,7 +56,7 @@ private slots:
 private:
     Entry* targetEntry() const;
     bool isConcatenatedNotes(const QString& key) const;
-    bool isProtectedAttribute(const QString& key) const;
+    bool isHiddenAttribute(const QString& key) const;
     QString attributeLabel(const QString& key) const;
     QString valueLabel(const QString& key, const QString& value) const;
     QString entryLabel(const Entry* entry) const;

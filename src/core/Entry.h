@@ -204,8 +204,9 @@ public:
      *
      * Attributes that all entries agree on are left out, so the result contains
      * exactly those attributes that need a decision before the entries can be
-     * merged into one. Passkey attributes are never reported because a passkey is
-     * only ever merged as a whole.
+     * merged into one. Passkey and TOTP attributes are never reported because they
+     * are only ever merged as a whole, and neither is a remembered decision to run
+     * a command URL, which belongs to the entry it was made for.
      *
      * @return The conflicting attribute names, each mapped to the distinct
      *         non-empty values found, in the order the entries were given
@@ -229,16 +230,24 @@ public:
      *
      * The values in @p resolvedAttributes are applied first and are never
      * overwritten afterwards. Every other attribute, attachment, tag, Auto-Type
-     * association, custom data item, the icon and the TOTP settings are taken from
-     * the other entries only where this entry has nothing of its own, so a merge
-     * never silently replaces existing data. Conflicting values that are dropped
-     * are kept as additional URLs or as custom attributes, depending on @p flags.
+     * association, custom data item, the icon, the colors and the URL override are
+     * taken from the other entries only where this entry has nothing of its own, so
+     * a merge never silently replaces existing data. Values that are dropped,
+     * including the ones this entry held before @p resolvedAttributes replaced
+     * them, are kept as additional URLs or as custom attributes, depending on
+     * @p flags. An attribute stays protected as long as any merged entry protected
+     * it.
+     *
+     * The expiry, the Auto-Type settings and the exclusion from reports have no
+     * notion of being unset, so this entry keeps its own.
      *
      * Custom icons are expected to belong to the same database as this entry.
      *
-     * A passkey is merged as a single unit and only into an entry that does not
-     * carry one yet, so that no passkey is left half-merged. The entries reported
-     * by unmergeableEntries() are skipped entirely.
+     * A passkey and the TOTP settings are merged as single units and only into an
+     * entry that does not carry one yet, so that neither is left half-merged or
+     * silently replaced. The entries reported by unmergeableEntries() are skipped
+     * entirely. A remembered decision to run a command URL is never taken from
+     * another entry, and is forgotten when the URL of this entry changes.
      *
      * The other entries are left untouched; removing them is up to the caller. Wrap
      * the call in beginUpdate() and endUpdate() to make the merge undoable through
@@ -318,10 +327,13 @@ private:
 
     void mergeAttributesFrom(const Entry* other, const QSet<QString>& protectedKeys, MergeFlags flags);
     void mergePasskeyFrom(const Entry* other);
+    void mergeTotpFrom(const Entry* other, const QSet<QString>& protectedKeys, MergeFlags flags);
     void mergeAttachmentsFrom(const Entry* other);
-    void addAdditionalUrl(const QString& url);
+    void setMergedAttribute(const QString& key, const QString& value, bool protect);
+    void addAdditionalUrl(const QString& url, bool protect);
+    bool hasTotpAttributes() const;
     static bool isUrlAttribute(const QString& key);
-    QString availableAttributeKey(const QString& key) const;
+    QString availableAttributeKey(const QString& key, bool forceSuffix = false) const;
     QString availableAttachmentKey(const QString& key) const;
 
     static QString buildReference(const QUuid& uuid, const QString& field);
